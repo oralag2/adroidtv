@@ -105,6 +105,80 @@ class UaKinoRepositoryTest {
         assertEquals("https://uakino.best/filmy/101-film.html", ajax.getHeader("Referer"))
     }
 
+    @Test fun `actual source flow follows download page then submits declared torrent POST`() = runBlocking {
+        server.enqueue(html(fixture("matrix-source-details.html")))
+        server.enqueue(html(fixture("matrix-source-download.html")))
+        server.enqueue(html(fixture("matrix-source-releases.html")))
+        val filmPage = "https://uakino.best/filmy/genre-action/11-matrycia.html"
+        val downloadPage = "https://uakino.best/filmy/genre-action/11-matrycia/download.html"
+        val details = repository.details(Movie(filmPage, "Матриця"))
+        assertEquals(5, details.torrents.size)
+        assertEquals(downloadPage, details.torrents.first().referer)
+        assertNull(details.torrentNotice)
+        assertEquals("/filmy/genre-action/11-matrycia.html", server.takeRequest().path)
+        val downloadRequest = server.takeRequest()
+        assertEquals("/filmy/genre-action/11-matrycia/download.html", downloadRequest.path)
+        assertEquals(filmPage, downloadRequest.getHeader("Referer"))
+        val post = server.takeRequest()
+        assertEquals("POST", post.method)
+        assertEquals("/engine/ajax/toloka.php", post.path)
+        assertEquals(downloadPage, post.getHeader("Referer"))
+        val fields = post.body.readUtf8().split('&').associate { field ->
+            val pair = field.split('=', limit = 2)
+            URLDecoder.decode(pair[0], "UTF-8") to URLDecoder.decode(pair[1], "UTF-8")
+        }
+        assertEquals("11", fields["id"])
+        assertEquals("Матриця", fields["title"])
+        assertEquals("filmy/genre-action/", fields["cat"])
+    }
+
+    @Test fun `source no-release result remains a useful film detail response`() = runBlocking {
+        server.enqueue(html(fixture("matrix-source-details.html")))
+        server.enqueue(html(fixture("matrix-source-download.html")))
+        server.enqueue(html("<center>Oppps роздач не виявлено зверніться до адміна</center>"))
+        val details = repository.details(Movie("https://uakino.best/filmy/genre-action/11-matrycia.html", "Матриця"))
+        assertTrue(details.torrents.isEmpty())
+        assertEquals("Джерело не знайшло торрент-роздач для цього фільму.", details.torrentNotice)
+    }
+
+    @Test fun `unavailable torrent page preserves playable film details with a visible error`() = runBlocking {
+        server.enqueue(html(fixture("matrix-source-details.html")))
+        server.enqueue(MockResponse().setResponseCode(503))
+        val details = repository.details(Movie("https://uakino.best/filmy/genre-action/11-matrycia.html", "Матриця"))
+        assertNotNull(details.onlineUrl)
+        assertTrue(details.torrents.isEmpty())
+        assertTrue(details.torrentNotice.orEmpty().contains("503"))
+    }
+
+    @Test fun `actual JSON playlist response resolves a playable movie before loading torrents`() = runBlocking {
+        server.enqueue(html(fixture("matrix-playlist-details.html")))
+        server.enqueue(MockResponse().addHeader("Content-Type", "application/json; charset=UTF-8").setBody(fixture("matrix-source-playlist.json")))
+        server.enqueue(html(fixture("matrix-source-download.html")))
+        server.enqueue(html(fixture("matrix-source-releases.html")))
+        val filmPage = "https://uakino.best/filmy/genre-action/11-matrycia.html"
+        val details = repository.details(Movie(filmPage, "Матриця"))
+        assertEquals("https://ashdi.vip/vod/146072", details.onlineUrl)
+        assertEquals(5, details.torrents.size)
+        server.takeRequest()
+        val playlistRequest = server.takeRequest()
+        assertEquals("GET", playlistRequest.method)
+        assertEquals("/engine/ajax/playlists.php?news_id=11&xfield=playlist&time=1778492761", playlistRequest.path)
+        assertEquals(filmPage, playlistRequest.getHeader("Referer"))
+        assertEquals("XMLHttpRequest", playlistRequest.getHeader("X-Requested-With"))
+    }
+
+    @Test fun `failed player JSON response keeps torrent access and does not expose a trailer`() = runBlocking {
+        server.enqueue(html(fixture("matrix-playlist-details.html")))
+        server.enqueue(MockResponse().addHeader("Content-Type", "application/json").setBody("{\"success\":false}"))
+        server.enqueue(html(fixture("matrix-source-download.html")))
+        server.enqueue(html(fixture("matrix-source-releases.html")))
+        val details = repository.details(Movie("https://uakino.best/filmy/genre-action/11-matrycia.html", "Матриця"))
+        assertNull(details.onlineUrl)
+        assertEquals(5, details.torrents.size)
+    }
+
+    private fun fixture(name: String): String = requireNotNull(javaClass.getResource("/uakino/$name")).readText()
+
     private fun card() = "<div class='movie-item'><a class='movie-title' href='/filmy/101-film.html'>Фільм</a></div>"
     private fun html(body: String) = MockResponse().addHeader("Content-Type", "text/html; charset=UTF-8").setBody(body)
 }

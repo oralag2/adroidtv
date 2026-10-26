@@ -1,0 +1,12 @@
+<!-- Structural excerpt of the live download page, fetched 2026-10-26. -->
+<div id="torrent_info"></div>
+<div id="torrent_loading">Пошук торрент роздач, будь ласка зачекайте!</div>
+<script>
+$(document).ready(function(){
+    $('#torrent_loading').show();
+    $.post(dle_root + 'engine/ajax/toloka.php', {id: '11', cat: 'filmy/genre-action/', title: 'Матриця', theme: '/templates/uakino'}, function(data){
+        $('#torrent_loading').hide();
+        $('#torrent_info').fadeIn(500).html(data);
+    });
+});
+</script>

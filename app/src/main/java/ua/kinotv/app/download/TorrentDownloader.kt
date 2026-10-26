@@ -24,7 +24,6 @@ import okhttp3.Dns
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
-import okhttp3.Request
 import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
@@ -56,10 +55,7 @@ class TorrentDownloader(context: Context, private val client: OkHttpClient) {
             var redirects = 0
             while (true) {
                 currentCoroutineContext().ensureActive()
-                val request = Request.Builder().url(url)
-                    .header("Accept", "application/x-bittorrent, application/octet-stream;q=0.9, */*;q=0.1")
-                    .header("Referer", origin.newBuilder().fragment(null).build().toString())
-                    .build()
+                val request = TorrentHttp.request(url, origin)
                 val call = transport.newCall(request)
                 val next = withCancellation(call) {
                     call.execute().use { response ->
@@ -109,14 +105,9 @@ class TorrentDownloader(context: Context, private val client: OkHttpClient) {
     fun fileFor(record: DownloadRecord): File? = TorrentPaths.fileFor(directory, record.fileName)
 
     private suspend fun saveResponse(response: Response, part: File, onProgress: (Int) -> Unit) {
-        if (!response.isSuccessful) throw IOException("Сервер повернув HTTP ${response.code} під час завантаження торренту.")
+        TorrentHttp.validateResponse(response)
         val body = response.body ?: throw IOException("Сервер повернув порожню відповідь.")
-        val contentType = body.contentType()?.toString().orEmpty().lowercase()
-        if ("text/html" in contentType || "application/json" in contentType) {
-            throw IOException("Замість торрент-файлу сервер повернув сторінку або повідомлення про помилку.")
-        }
         val length = body.contentLength()
-        if (length > TorrentValidator.MAX_BYTES) throw IOException("Торрент-файл перевищує обмеження 5 МіБ.")
         onProgress(if (length > 0) 0 else -1)
         var received = 0L
         var previousProgress = Int.MIN_VALUE

@@ -1,8 +1,5 @@
 package ua.kinotv.app
 
-import android.content.ActivityNotFoundException
-import android.content.Intent
-import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -12,7 +9,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import ua.kinotv.app.playback.PlayerActivity
 import ua.kinotv.app.ui.KinoTvApp
 
 class MainActivity : ComponentActivity() {
@@ -41,23 +38,17 @@ class MainActivity : ComponentActivity() {
                 onOpenDownload = model::openDownload,
                 onSaveBaseUrl = model::saveBaseUrl,
                 onDismissMessage = model::dismissMessage,
-                onOpenOnline = { openOnline(state.details?.onlineUrl) },
+                onOpenOnline = {
+                    val details = state.details
+                    if (details == null || details.onlineUrl == null) {
+                        model.showMessage("Джерело не надало підтримуване посилання для онлайн-перегляду.")
+                    } else {
+                        startActivity(PlayerActivity.intent(this, details.onlineUrl,
+                            details.movie.pageUrl, details.movie.title))
+                    }
+                },
             )
         }
     }
 
-    private fun openOnline(address: String?) {
-        val url = address?.toHttpUrlOrNull()
-        if (url == null || !url.isHttps || url.username.isNotEmpty() || url.password.isNotEmpty()) {
-            model.showMessage("Джерело не надало підтримуване HTTPS-посилання для онлайн-перегляду.")
-            return
-        }
-        try {
-            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url.toString())))
-        } catch (_: ActivityNotFoundException) {
-            model.showMessage("На пристрої немає застосунку для відкриття цього онлайн-посилання.")
-        } catch (_: SecurityException) {
-            model.showMessage("Пристрій заборонив відкриття цього онлайн-посилання.")
-        }
-    }
 }

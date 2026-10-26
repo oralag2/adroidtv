@@ -81,5 +81,53 @@ class UaKinoParserTest {
         }
     }
 
+    @Test fun `live source structure exposes the download page and player without the trailer`() {
+        val sourcePage = "${base}filmy/genre-action/11-matrycia.html"
+        val document = parser.document(fixture("matrix-source-details.html"), sourcePage)
+        assertEquals("${base}filmy/genre-action/11-matrycia/download.html", parser.torrentPage(document, sourcePage))
+        assertEquals("https://ashdi.vip/vod/12345", parser.details(document, Movie(sourcePage, "Матриця")).onlineUrl)
+        assertTrue(parser.torrents(document, sourcePage).isEmpty())
+    }
+
+    @Test fun `observed download page supplies literal torrent POST fields`() {
+        val downloadPage = "${base}filmy/genre-action/11-matrycia/download.html"
+        val request = requireNotNull(parser.torrentRequest(parser.document(fixture("matrix-source-download.html"), downloadPage), downloadPage))
+        assertEquals("${base}engine/ajax/toloka.php", request.url)
+        assertEquals(mapOf("id" to "11", "cat" to "filmy/genre-action/", "title" to "Матриця", "theme" to "/templates/uakino"), request.fields)
+    }
+
+    @Test fun `torrent POST parser handles escaped quotes without running script expressions`() {
+        val html = """<script>$.post(dle_root + 'engine/ajax/toloka.php', {id:'11', cat:'filmy/', title:'Він сказав \'так\'', theme:'/templates/uakino'}, done);</script>"""
+        assertEquals("Він сказав 'так'", parser.torrentRequest(parser.document(html, page), page)?.fields?.get("title"))
+        val dynamic = html.replace("id:'11'", "id:readMovieId()")
+        assertNull(parser.torrentRequest(parser.document(dynamic, page), page))
+    }
+
+    @Test fun `live torrent table provides descriptor routes and release metadata`() {
+        val releases = parser.torrents(parser.document(fixture("matrix-source-releases.html"), page), page)
+        assertEquals(5, releases.size)
+        assertEquals("${base}download/711542/torrent/", releases.first().downloadUrl)
+        assertEquals("1080p", releases.first().quality)
+        assertEquals("70.99 GB", releases.first().size)
+        assertEquals("1", releases.first().seeders)
+        assertEquals("3xUkr/Eng", releases.first().audio)
+        assertEquals("2160p", releases.last().quality)
+        assertEquals("39", releases.last().seeders)
+    }
+
+    @Test fun `explicit missing torrents is recognized separately from a changed response`() {
+        assertTrue(parser.hasExplicitEmptyTorrents(parser.document("<center>Oppps роздач не виявлено зверніться до адміна</center>", page)))
+        assertFalse(parser.hasExplicitEmptyTorrents(parser.document("<div>Новий формат відповіді</div>", page)))
+    }
+
+    @Test fun `live playlist widget declares its source request without accepting trailer as movie`() {
+        val document = parser.document(fixture("matrix-playlist-details.html"), page)
+        assertNull(parser.details(document, Movie(page, "Матриця")).onlineUrl)
+        val request = requireNotNull(parser.playlistRequest(document, page))
+        assertEquals("${base}engine/ajax/playlists.php", request.url)
+        assertEquals(mapOf("news_id" to "11", "xfield" to "playlist", "time" to "1778492761"), request.fields)
+        assertNull(parser.playlistRequest(parser.document("<div class='playlists-ajax' data-news_id='../11' data-xfname='playlist'></div>", page), page))
+    }
+
     private fun fixture(name: String): String = requireNotNull(javaClass.getResource("/uakino/$name")).readText()
 }

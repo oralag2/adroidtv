@@ -290,6 +290,7 @@ private fun MovieCard(movie: Movie, onClick: () -> Unit, modifier: Modifier) {
         modifier = modifier.fillMaxWidth().onFocusChanged { focused = it.hasFocus }
             .border(if (focused) 3.dp else 0.dp, Accent, RoundedCornerShape(12.dp)),
         contentPadding = PaddingValues(8.dp),
+        shape = ButtonDefaults.shape(shape = RoundedCornerShape(12.dp)),
         colors = ButtonDefaults.colors(
             containerColor = Panel,
             contentColor = Color.White,
@@ -340,7 +341,7 @@ private fun MovieScreen(
     if (state.isLoading) LoadingIndicator()
     state.error?.let { ErrorPanel(it, onRetry) }
     if (showTorrents && state.details != null) {
-        TorrentList(state.details, state.activeDownloads, onDownload)
+        TorrentList(state.details, state.activeDownloads, onDownload, onRetry)
     } else {
         val detailScroll = rememberScrollState()
         Column(
@@ -355,9 +356,12 @@ private fun MovieScreen(
                     state.details?.let { details ->
                         if (details.genres.isNotEmpty()) Text(details.genres.joinToString(" • "), color = Muted)
                         details.rating?.let { Text("Рейтинг: $it", color = Accent) }
-                        TvAction("Торенти (${details.torrents.size})", { showTorrents = true })
+                        TvAction(
+                            if (details.torrents.isEmpty()) "Торенти" else "Торенти (${details.torrents.size})",
+                            { showTorrents = true },
+                        )
                         if (details.onlineUrl != null) {
-                            TvAction("Дивитися онлайн у зовнішньому застосунку", onOpenOnline)
+                            TvAction("Дивитися онлайн", onOpenOnline)
                         } else {
                             Text("Онлайн-перегляд для цієї сторінки поки недоступний.", color = Muted, fontSize = 13.sp)
                         }
@@ -376,13 +380,21 @@ private fun TorrentList(
     details: MovieDetails,
     activeDownloads: Map<String, Int>,
     onDownload: (TorrentRelease) -> Unit,
+    onRetry: () -> Unit,
 ) {
     LazyColumn(verticalArrangement = Arrangement.spacedBy(16.dp), contentPadding = PaddingValues(8.dp)) {
         item {
             Text("Торент-роздачі", fontSize = 26.sp, fontWeight = FontWeight.Bold)
             Text("Завантажується лише .torrent-файл. Відео завантажує зовнішній торрент-застосунок.", color = Muted, fontSize = 13.sp)
         }
-        details.torrentNotice?.let { notice -> item { EmptyPanel(notice) } }
+        details.torrentNotice?.let { notice ->
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    EmptyPanel(notice)
+                    TvAction("Оновити роздачі", onRetry)
+                }
+            }
+        }
         if (details.torrents.isEmpty() && details.torrentNotice == null) {
             item { EmptyPanel("Сайт не надав доступних торрент-файлів для цього фільму.") }
         }

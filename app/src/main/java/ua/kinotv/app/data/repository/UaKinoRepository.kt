@@ -14,6 +14,8 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.nodes.Document
+import org.json.JSONException
+import org.json.JSONObject
 import ua.kinotv.app.data.model.MediaKind
 import ua.kinotv.app.data.model.Movie
 import ua.kinotv.app.data.model.MovieDetails
@@ -68,17 +70,52 @@ class UaKinoRepository(client: OkHttpClient, private val baseUrl: () -> String) 
         val url = SourceUrl.publicHttps(movie.pageUrl, origin.toString(), sameOrigin = true)?.toHttpUrl()
             ?: throw IOException("Адреса фільму не належить поточному домену. Оновіть каталог.")
         val loaded = html(request(url), origin)
-        val details = parser.details(loaded.document, movie.copy(pageUrl = loaded.url.toString()))
-        if (details.torrents.isNotEmpty()) return details
-        val endpoint = parser.torrentEndpoint(loaded.document, loaded.url.toString()) ?: return details
+        var details = parser.details(loaded.document, movie.copy(pageUrl = loaded.url.toString()))
+        if (details.onlineUrl == null) {
+            val playlist = parser.playlistRequest(loaded.document, loaded.url.toString())
+            if (playlist != null) {
+                try {
+                    val playlistUrl = playlist.url.toHttpUrl().newBuilder()
+                    playlist.fields.forEach { (name, value) -> playlistUrl.addQueryParameter(name, value) }
+                    val player = html(request(playlistUrl.build()).newBuilder()
+                        .header("Referer", loaded.url.toString())
+                        .header("X-Requested-With", "XMLHttpRequest").build(), origin, unwrapPlaylist = true)
+                    details = details.copy(onlineUrl = parser.onlineUrl(player.document, player.url.toString()))
+                } catch (_: IOException) {
+                    // Film metadata and torrents remain usable when this independent player endpoint fails.
+                    currentCoroutineContext().ensureActive()
+                }
+            }
+        }
+        if (details.torrents.isNotEmpty()) return details.copy(torrents = details.torrents.map { it.copy(referer = loaded.url.toString()) })
         return try {
-            val ajaxRequest = request(endpoint.toHttpUrl()).newBuilder()
-                .header("Referer", loaded.url.toString())
+            val torrentPageUrl = parser.torrentPage(loaded.document, loaded.url.toString())
+            val torrentPage = if (torrentPageUrl != null) {
+                html(request(torrentPageUrl.toHttpUrl()).newBuilder()
+                    .header("Referer", loaded.url.toString()).build(), origin)
+            } else loaded
+            val directReleases = parser.torrents(torrentPage.document, torrentPage.url.toString())
+            if (directReleases.isNotEmpty()) return details.copy(torrents = directReleases.map { it.copy(referer = torrentPage.url.toString()) }, torrentNotice = null)
+            val form = parser.torrentRequest(torrentPage.document, torrentPage.url.toString())
+            val endpoint = form?.url ?: parser.torrentEndpoint(torrentPage.document, torrentPage.url.toString())
+                ?: return details.copy(torrentNotice = if (parser.hasExplicitEmptyTorrents(torrentPage.document)) NO_TORRENTS else details.torrentNotice)
+            val ajaxBuilder = request(endpoint.toHttpUrl()).newBuilder()
+                .header("Referer", torrentPage.url.toString())
                 .header("X-Requested-With", "XMLHttpRequest")
-                .build()
+            if (form != null) {
+                val body = FormBody.Builder(Charsets.UTF_8)
+                form.fields.forEach { (name, value) -> body.add(name, value) }
+                ajaxBuilder.post(body.build())
+            }
+            val ajaxRequest = ajaxBuilder.build()
             val torrentHtml = html(ajaxRequest, origin)
             val releases = parser.torrents(torrentHtml.document, torrentHtml.url.toString())
-            details.copy(torrents = releases, torrentNotice = if (releases.isEmpty()) details.torrentNotice else null)
+                .map { it.copy(referer = torrentPage.url.toString()) }
+            details.copy(torrents = releases, torrentNotice = when {
+                releases.isNotEmpty() -> null
+                parser.hasExplicitEmptyTorrents(torrentHtml.document) -> NO_TORRENTS
+                else -> "Не вдалося прочитати список торрент-роздач. Спробуйте повторити запит пізніше."
+            })
         } catch (error: IOException) {
             currentCoroutineContext().ensureActive()
             details.copy(torrentNotice = "Не вдалося завантажити роздачі: ${error.message ?: "мережева помилка"}")
@@ -88,14 +125,14 @@ class UaKinoRepository(client: OkHttpClient, private val baseUrl: () -> String) 
     private fun sourceOrigin(): HttpUrl = SourceUrl.normalizeBaseUrl(baseUrl()).toHttpUrl()
 
     private fun request(url: HttpUrl): Request = Request.Builder().url(url)
-        .header("User-Agent", "KinoTV/0.1 (Android TV)")
+        .header("User-Agent", BROWSER_USER_AGENT)
         .header("Accept", "text/html,application/xhtml+xml;q=0.9")
         .header("Accept-Language", "uk-UA,uk;q=0.9,en;q=0.5")
         .build()
 
     private data class LoadedHtml(val document: Document, val url: HttpUrl)
 
-    private suspend fun html(initialRequest: Request, origin: HttpUrl): LoadedHtml = withContext(Dispatchers.IO) {
+    private suspend fun html(initialRequest: Request, origin: HttpUrl, unwrapPlaylist: Boolean = false): LoadedHtml = withContext(Dispatchers.IO) {
         var nextRequest = initialRequest
         repeat(MAX_REDIRECTS + 1) { redirectCount ->
             currentCoroutineContext().ensureActive()
@@ -123,7 +160,8 @@ class UaKinoRepository(client: OkHttpClient, private val baseUrl: () -> String) 
                     }
                     val body = response.body ?: throw IOException("Сайт повернув порожню відповідь.")
                     val mime = body.contentType()
-                    if (mime != null && mime.type != "text" && !(mime.type == "application" && mime.subtype == "xhtml+xml")) {
+                    if (mime != null && mime.type != "text" && !(mime.type == "application" &&
+                        (mime.subtype == "xhtml+xml" || (unwrapPlaylist && mime.subtype == "json")))) {
                         throw SourceFormatException("Замість HTML сайт повернув непідтримуваний формат даних.")
                     }
                     if (body.contentLength() > MAX_HTML_BYTES) throw IOException("Сторінка джерела перевищує допустимий розмір.")
@@ -141,7 +179,16 @@ class UaKinoRepository(client: OkHttpClient, private val baseUrl: () -> String) 
                         }
                     }
                     val charset = mime?.charset(Charsets.UTF_8) ?: Charsets.UTF_8
-                    val text = bytes.toString(charset.name())
+                    var text = bytes.toString(charset.name())
+                    if (unwrapPlaylist) {
+                        val data = try { JSONObject(text) } catch (_: JSONException) {
+                            throw SourceFormatException("Джерело повернуло некоректні дані програвача.")
+                        }
+                        if (!data.optBoolean("success") || data.optString("response").isBlank()) {
+                            throw SourceFormatException("Джерело не надало доступного програвача.")
+                        }
+                        text = data.optString("response")
+                    }
                     return@withContext LoadedHtml(parser.document(text, nextRequest.url.toString()), nextRequest.url)
                 }
             }
@@ -163,6 +210,8 @@ class UaKinoRepository(client: OkHttpClient, private val baseUrl: () -> String) 
     }
 
     companion object {
+        const val BROWSER_USER_AGENT = "Mozilla/5.0 (Linux; Android 11; Android TV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        private const val NO_TORRENTS = "Джерело не знайшло торрент-роздач для цього фільму."
         private const val MAX_HTML_BYTES = 4 * 1024 * 1024
         private const val MAX_REDIRECTS = 5
         private val REDIRECT_CODES = setOf(301, 302, 303, 307, 308)

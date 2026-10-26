@@ -131,7 +131,7 @@ class KinoViewModel(private val app: KinoApplication) : ViewModel() {
 
     fun download(release: TorrentRelease) {
         if (downloadJobs[release.id]?.isActive == true) return
-        val referer = state.value.selectedMovie?.pageUrl ?: return
+        val referer = release.referer ?: state.value.selectedMovie?.pageUrl ?: return
         mutableState.update { it.copy(activeDownloads = it.activeDownloads + (release.id to -1)) }
         downloadJobs[release.id] = viewModelScope.launch {
             try {

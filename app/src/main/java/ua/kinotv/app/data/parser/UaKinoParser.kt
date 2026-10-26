@@ -12,6 +12,9 @@ import java.util.Locale
 
 class SourceFormatException(message: String) : IOException(message)
 
+data class SourceTorrentRequest(val url: String, val fields: Map<String, String>)
+data class SourcePlaylistRequest(val url: String, val fields: Map<String, String>)
+
 /**
  * Parses source HTML without executing scripts or inventing releases.
  * UA Kino's markup is not a versioned API; failures must stay visible to the user.
@@ -93,6 +96,7 @@ class UaKinoParser {
         document.select("a[href]").mapNotNull { link ->
             val href = link.attr("href")
             val isTorrent = TORRENT_EXTENSION.containsMatchIn(href) ||
+                SITE_TORRENT_DOWNLOAD.containsMatchIn(href) ||
                 link.attr("type").equals("application/x-bittorrent", true) ||
                 link.attr("download").endsWith(".torrent", true) ||
                 (href.contains("/engine/download.php", true) && link.parents().any { isTorrentContainer(it) })
@@ -100,6 +104,7 @@ class UaKinoParser {
             val url = SourceUrl.publicHttps(href, pageUrl) ?: return@mapNotNull null
             val row = link.parents().firstOrNull { it.`is`("tr, .torrent-item, .torrent-row, .torrent-release, .release-item, .tor-item") } ?: link
             val text = row.text()
+            val tableMetadata = row.select("th.torrent-sp, td.torrent-sp")
             val releaseTitle = row.selectFirst(".torrent-title, .release-title, .tor-title")?.text()?.takeIf(String::isNotBlank)
                 ?: link.attr("data-title").takeIf(String::isNotBlank)
                 ?: link.attr("title").takeIf(String::isNotBlank)
@@ -110,12 +115,85 @@ class UaKinoParser {
                 title = releaseTitle,
                 downloadUrl = url,
                 quality = row.attr("data-quality").takeIf(String::isNotBlank) ?: QUALITY.find(text)?.value,
-                size = row.selectFirst(".torrent-size, .release-size, .tor-size")?.text()?.takeIf(String::isNotBlank) ?: SIZE.find(text)?.value,
+                size = row.selectFirst(".torrent-size, .release-size, .tor-size")?.text()?.takeIf(String::isNotBlank)
+                    ?: tableMetadata.getOrNull(0)?.text()?.takeIf(String::isNotBlank) ?: SIZE.find(text)?.value,
                 videoCodec = CODEC.find(text)?.value,
-                audio = row.selectFirst(".torrent-audio, .release-audio, .tor-audio")?.text()?.takeIf(String::isNotBlank),
-                seeders = row.selectFirst(".seeders, .torrent-seeds, .tor-seeds")?.text()?.takeIf(String::isNotBlank),
+                audio = row.selectFirst(".torrent-audio, .release-audio, .tor-audio")?.text()?.takeIf(String::isNotBlank)
+                    ?: AUDIO.find(releaseTitle)?.value,
+                seeders = row.selectFirst(".seeders, .torrent-seeds, .tor-seeds")?.text()?.takeIf(String::isNotBlank)
+                    ?: tableMetadata.getOrNull(1)?.text()?.takeIf(String::isNotBlank),
             )
         }.distinctBy(TorrentRelease::downloadUrl)
+
+    /** UA Kino declares a separate download page on the film, rather than listing files there. */
+    fun torrentPage(document: Document, pageUrl: String): String? =
+        document.select("a.torentdownload[href], a.torrentdownload[href]").firstNotNullOfOrNull { link ->
+            SourceUrl.publicHttps(link.attr("href"), pageUrl, sameOrigin = true)
+        }
+
+    /**
+     * Read the literal POST fields emitted by UA Kino's download page. This does not
+     * execute JavaScript, infer endpoints, or send the site's unrelated analytics calls.
+     */
+    fun torrentRequest(document: Document, pageUrl: String): SourceTorrentRequest? {
+        for (script in document.select("script:not([src])")) {
+            val match = TORRENT_POST.find(script.data()) ?: continue
+            val endpoint = SourceUrl.publicHttps("/" + match.groupValues[2], pageUrl, sameOrigin = true) ?: continue
+            val fields = mutableMapOf<String, String>()
+            for (field in LITERAL_FIELD.findAll(match.groupValues[3])) {
+                val key = field.groupValues[1]
+                if (key !in TORRENT_FIELDS) continue
+                val decoded = decodeJavaScriptString(field.groupValues[3]) ?: return null
+                if (decoded.length > 1000 || fields.put(key, decoded) != null) return null
+            }
+            if (fields.keys != TORRENT_FIELDS || !fields.getValue("id").matches(Regex("[0-9]{1,12}"))) continue
+            return SourceTorrentRequest(endpoint, fields)
+        }
+        return null
+    }
+
+    fun hasExplicitEmptyTorrents(document: Document): Boolean {
+        val text = document.text().lowercase(Locale.ROOT)
+        return listOf("роздач не виявлено", "роздач не знайдено", "торрентів не знайдено", "торентів не знайдено").any(text::contains)
+    }
+
+    /** The current source player.js requests this endpoint for its declared playlist widget. */
+    fun playlistRequest(document: Document, pageUrl: String): SourcePlaylistRequest? {
+        val widget = document.selectFirst(".playlists-ajax[data-news_id][data-xfname]") ?: return null
+        val id = widget.attr("data-news_id")
+        val field = widget.attr("data-xfname")
+        if (!id.matches(Regex("[0-9]{1,12}")) || !field.matches(Regex("[A-Za-z_][A-Za-z0-9_]{0,79}"))) return null
+        val endpoint = SourceUrl.publicHttps("/engine/ajax/playlists.php", pageUrl, sameOrigin = true) ?: return null
+        val time = document.select("script:not([src])").firstNotNullOfOrNull { script ->
+            EDIT_TIME.find(script.data())?.groupValues?.get(1)
+        }.orEmpty()
+        return SourcePlaylistRequest(endpoint, mapOf("news_id" to id, "xfield" to field, "time" to time))
+    }
+
+    private fun decodeJavaScriptString(value: String): String? {
+        val decoded = StringBuilder()
+        var index = 0
+        while (index < value.length) {
+            val current = value[index++]
+            if (current != '\\') { decoded.append(current); continue }
+            if (index >= value.length) return null
+            when (val escape = value[index++]) {
+                '\\', '\'', '"', '/' -> decoded.append(escape)
+                'n' -> decoded.append('\n')
+                'r' -> decoded.append('\r')
+                't' -> decoded.append('\t')
+                'u', 'x' -> {
+                    val length = if (escape == 'u') 4 else 2
+                    if (index + length > value.length) return null
+                    val code = value.substring(index, index + length).toIntOrNull(16) ?: return null
+                    decoded.append(code.toChar())
+                    index += length
+                }
+                else -> return null
+            }
+        }
+        return decoded.toString()
+    }
 
     /** Follow only an endpoint declared by source markup, never a guessed JavaScript API. */
     fun torrentEndpoint(document: Document, pageUrl: String): String? {
@@ -135,8 +213,8 @@ class UaKinoParser {
     private fun isTorrentContainer(element: Element): Boolean =
         (element.id() + " " + element.className()).contains("torrent", true) || element.hasAttr("data-torrent-url")
 
-    private fun onlineUrl(document: Document, pageUrl: String): String? {
-        val candidates = document.select("video[src], video source[src], [itemprop=embedUrl], [itemprop=contentUrl], [itemprop=video], #player iframe, .player iframe, .full-text iframe, .playlists-videos [data-file]")
+    fun onlineUrl(document: Document, pageUrl: String): String? {
+        val candidates = document.select("video[src], video source[src], [itemprop=embedUrl], [itemprop=contentUrl], [itemprop=video], iframe#pre, #player iframe, .player iframe, .players-section iframe, .full-text iframe, .playlists-videos [data-file]")
         return candidates.firstNotNullOfOrNull { element ->
             if (element.parents().any {
                     val marker = it.id() + " " + it.className()
@@ -153,8 +231,14 @@ class UaKinoParser {
         private val ARTICLE_PATH = Regex("/\\d+-[^/?#]+\\.html(?:$|[?#])", RegexOption.IGNORE_CASE)
         private val YEAR = Regex("\\b(?:19|20)\\d{2}\\b")
         private val TORRENT_EXTENSION = Regex("\\.torrent(?:$|[?#])", RegexOption.IGNORE_CASE)
+        private val SITE_TORRENT_DOWNLOAD = Regex("(?:^|/)download/[0-9]+/torrent/(?:$|[?#])", RegexOption.IGNORE_CASE)
+        private val TORRENT_POST = Regex("""\${'$'}\s*\.\s*post\s*\(\s*dle_root\s*\+\s*(['"])(engine/ajax/toloka\.php)\1\s*,\s*\{([\s\S]*?)}""")
+        private val LITERAL_FIELD = Regex("""([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(['"])((?:\\.|(?!\2)[^\\])*)\2""")
+        private val TORRENT_FIELDS = setOf("id", "cat", "title", "theme")
+        private val EDIT_TIME = Regex("""\bvar\s+dle_edittime\s*=\s*['"]([0-9]{0,20})['"]""")
         private val QUALITY = Regex("\\b(?:2160|1080|720|480)p\\b|\\b4K\\b", RegexOption.IGNORE_CASE)
         private val SIZE = Regex("\\b\\d+(?:[.,]\\d+)?\\s*(?:GiB|MiB|GB|MB|ГБ|МБ)\\b", RegexOption.IGNORE_CASE)
         private val CODEC = Regex("\\b(?:x26[45]|h[.]?26[45]|HEVC|AV1)(?:[ /+-]+HDR(?:10[+]?)?)?\\b", RegexOption.IGNORE_CASE)
+        private val AUDIO = Regex("\\b(?:[0-9]+x)?(?:Ukr|Українська)(?:/(?:Eng|[0-9]+xUkr))*\\b", RegexOption.IGNORE_CASE)
     }
 }

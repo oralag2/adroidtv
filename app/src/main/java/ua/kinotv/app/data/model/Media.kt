@@ -18,6 +18,7 @@ data class TorrentRelease(
     val videoCodec: String? = null,
     val audio: String? = null,
     val seeders: String? = null,
+    val referer: String? = null,
 )
 
 data class MovieDetails(
