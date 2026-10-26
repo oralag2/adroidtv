@@ -232,7 +232,7 @@ class UaKinoParser {
         private val YEAR = Regex("\\b(?:19|20)\\d{2}\\b")
         private val TORRENT_EXTENSION = Regex("\\.torrent(?:$|[?#])", RegexOption.IGNORE_CASE)
         private val SITE_TORRENT_DOWNLOAD = Regex("(?:^|/)download/[0-9]+/torrent/(?:$|[?#])", RegexOption.IGNORE_CASE)
-        private val TORRENT_POST = Regex("""\${'$'}\s*\.\s*post\s*\(\s*dle_root\s*\+\s*(['"])(engine/ajax/toloka\.php)\1\s*,\s*\{([\s\S]*?)}""")
+        private val TORRENT_POST = Regex("""\${'$'}\s*\.\s*post\s*\(\s*dle_root\s*\+\s*(['"])(engine/ajax/toloka\.php)\1\s*,\s*\{([\s\S]*?)\}""")
         private val LITERAL_FIELD = Regex("""([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(['"])((?:\\.|(?!\2)[^\\])*)\2""")
         private val TORRENT_FIELDS = setOf("id", "cat", "title", "theme")
         private val EDIT_TIME = Regex("""\bvar\s+dle_edittime\s*=\s*['"]([0-9]{0,20})['"]""")
