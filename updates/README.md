@@ -1,5 +1,7 @@
 # Оновлення KinoTV 0.2.0
 
+Для аварійного завершення з `PatternSyntaxException` після оновлення 0.2.0: [архів з одним виправленим файлом](https://github.com/oralag2/adroidtv/raw/refs/heads/main/updates/kinotv-startup-fix.zip), [список виправлень та інструкція](startup-fix.txt). Скопіюйте його вміст у корінь проєкту й підтвердьте заміну `UaKinoParser.kt`, потім натисніть **Run**.
+
 [Завантажити лише змінені файли](https://github.com/oralag2/adroidtv/raw/refs/heads/main/updates/kinotv-0.2-update.zip).
 
 Якщо пряме посилання не працює, відкрийте `kinotv-0.2-update.zip` у цій папці на GitHub і натисніть **Download raw file**.
